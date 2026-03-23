@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <h1>Claude 对话导出</h1>
+    <div id="status" class="status"></div>
+
+    <div class="section">
+      <label class="label">对话标题</label>
+      <input type="text" id="title" class="input" placeholder="自动获取..." />
+    </div>
+
+    <div class="section">
+      <label class="label">导出选项</label>
+      <div class="checkbox-group">
+        <label class="checkbox-label">
+          <input type="checkbox" id="includeTimestamp" checked />
+          包含时间戳
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="includeRole" checked />
+          包含角色标记
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="separateMessages" checked />
+          消息间分隔线
+        </label>
+      </div>
+    </div>
+
+    <div class="buttons">
+      <button id="exportMd" class="btn btn-primary">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <path d="M2 2h12v12H2V2z" stroke="currentColor" stroke-width="1.5" fill="none"/>
+          <path d="M4.5 10V6l2 2.5L8.5 6v4M10.5 10V6l1.5 2 1.5-2v4" stroke="currentColor" stroke-width="1.2"/>
+        </svg>
+        导出 Markdown
+      </button>
+      <button id="exportWord" class="btn btn-secondary">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <path d="M2 2h12v12H2V2z" stroke="currentColor" stroke-width="1.5" fill="none"/>
+          <path d="M4 10l1.5-4 1.5 4M5 8.5h1M9 10l1.5-4L12 10" stroke="currentColor" stroke-width="1.2"/>
+        </svg>
+        导出 Word
+      </button>
+    </div>
+
+    <div id="preview-section" class="section" style="display:none;">
+      <label class="label">预览 (前500字)</label>
+      <pre id="preview" class="preview"></pre>
+    </div>
+
+    <div class="footer">
+      <button id="previewBtn" class="btn-link">预览内容</button>
+      <span class="version">v1.0.0</span>
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
