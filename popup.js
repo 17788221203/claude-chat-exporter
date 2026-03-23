@@ -360,12 +360,74 @@ ${bodyContent}
     }
   });
 
+  // Refresh button - clear cache and re-extract
+  const refreshBtn = document.getElementById("refreshBtn");
+  refreshBtn.addEventListener("click", async () => {
+    cachedData = null;
+    try {
+      showStatus("正在重新提取...", "info");
+      const data = await getConversationData();
+      const humanCount = data.messages.filter(m => m.role === "human").length;
+      const assistantCount = data.messages.filter(m => m.role === "assistant").length;
+      showStatus(
+        `提取成功: ${humanCount} 条用户消息, ${assistantCount} 条 Claude 回复`,
+        "success"
+      );
+    } catch (err) {
+      showStatus(err.message, "error");
+    }
+  });
+
+  // Debug button - show DOM diagnostic info
+  const debugBtn = document.getElementById("debugBtn");
+  const debugSection = document.getElementById("debug-section");
+  const debugOutput = document.getElementById("debug-output");
+
+  debugBtn.addEventListener("click", async () => {
+    if (debugSection.style.display !== "none") {
+      debugSection.style.display = "none";
+      return;
+    }
+
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab) return;
+
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          files: ["content.js"],
+        });
+      } catch (e) { /* already injected */ }
+
+      chrome.tabs.sendMessage(tab.id, { action: "debugDOM" }, (response) => {
+        if (chrome.runtime.lastError || !response) {
+          debugOutput.textContent = "无法获取诊断信息";
+        } else {
+          debugOutput.textContent = JSON.stringify(response, null, 2);
+        }
+        debugSection.style.display = "block";
+      });
+    } catch (err) {
+      debugOutput.textContent = err.message;
+      debugSection.style.display = "block";
+    }
+  });
+
   // Auto-detect title on load
   (async () => {
     try {
       const data = await getConversationData();
       if (data.title) {
         titleInput.value = data.title;
+      }
+      const humanCount = data.messages.filter(m => m.role === "human").length;
+      const assistantCount = data.messages.filter(m => m.role === "assistant").length;
+      if (data.messages.length > 0) {
+        showStatus(
+          `检测到 ${humanCount} 条用户消息, ${assistantCount} 条 Claude 回复`,
+          "info"
+        );
       }
     } catch (e) {
       // Silently fail - user can set title manually

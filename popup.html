@@ -56,7 +56,14 @@
 
     <div class="footer">
       <button id="previewBtn" class="btn-link">预览内容</button>
-      <span class="version">v1.0.0</span>
+      <button id="refreshBtn" class="btn-link">刷新提取</button>
+      <button id="debugBtn" class="btn-link">诊断</button>
+      <span class="version">v1.1.0</span>
+    </div>
+
+    <div id="debug-section" class="section" style="display:none;">
+      <label class="label">DOM 诊断信息</label>
+      <pre id="debug-output" class="preview" style="font-size:11px;max-height:300px;"></pre>
     </div>
   </div>
   <script src="popup.js"></script>

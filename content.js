@@ -57,7 +57,6 @@
         return `~~${children().trim()}~~`;
 
       case "code": {
-        // Inline code (not inside <pre>)
         const parent = node.parentElement;
         if (parent && parent.tagName.toLowerCase() === "pre") {
           return node.textContent;
@@ -68,7 +67,6 @@
       case "pre": {
         const codeEl = node.querySelector("code");
         const text = codeEl ? codeEl.textContent : node.textContent;
-        // Try to detect language from class
         let lang = "";
         if (codeEl) {
           const langClass = Array.from(codeEl.classList).find(
@@ -78,12 +76,18 @@
             lang = langClass.replace(/^(language-|hljs-)/, "");
           }
         }
-        // Also check for a language label element that Claude often renders
-        const langLabel = node.parentElement?.querySelector(
-          '[class*="code-block"] [class*="lang"], [class*="language-label"], [class*="text-text-"]'
-        );
-        if (!lang && langLabel) {
-          lang = langLabel.textContent.trim().toLowerCase();
+        // Look for a language label in the code block header
+        const codeBlock = node.closest('[class*="code-block"], [class*="codeblock"], [class*="CodeBlock"]');
+        if (!lang && codeBlock) {
+          const langLabel = codeBlock.querySelector(
+            '[class*="lang"], [class*="language"], span, div'
+          );
+          if (langLabel && langLabel.textContent.trim().length < 30) {
+            const candidate = langLabel.textContent.trim().toLowerCase();
+            if (/^[a-z0-9+#.-]+$/.test(candidate)) {
+              lang = candidate;
+            }
+          }
         }
         return `\n\`\`\`${lang}\n${text}\n\`\`\`\n\n`;
       }
@@ -185,7 +189,6 @@
     if (matrix.length === 0) return "";
 
     const colCount = Math.max(...matrix.map((r) => r.length));
-    // Pad rows
     matrix.forEach((row) => {
       while (row.length < colCount) row.push("");
     });
@@ -201,218 +204,459 @@
   }
 
   /**
-   * Extract the conversation title from the page.
+   * Extract conversation title from the page.
    */
   function getConversationTitle() {
-    // Try several strategies
-    // 1. Document title
     const docTitle = document.title || "";
-    if (docTitle && docTitle !== "Claude") {
-      return docTitle.replace(/ - Claude$/, "").trim();
+    if (docTitle && docTitle !== "Claude" && !docTitle.startsWith("Claude")) {
+      return docTitle.replace(/ [-–|] Claude$/, "").trim();
     }
 
-    // 2. Look for a title in the header/nav area
-    const headerTitle = document.querySelector(
-      '[class*="conversation-title"], [class*="chat-title"], header h1, nav button[class*="truncate"]'
-    );
-    if (headerTitle) {
-      return headerTitle.textContent.trim();
+    // Look for a title element in the sidebar or header
+    const selectors = [
+      'button[data-testid*="conversation"] span',
+      '[class*="conversation-title"]',
+      '[class*="chat-title"]',
+      'nav button[class*="truncate"]',
+      'header h1',
+    ];
+    for (const sel of selectors) {
+      const el = document.querySelector(sel);
+      if (el && el.textContent.trim()) {
+        return el.textContent.trim();
+      }
     }
 
     return "Claude 对话";
   }
 
   /**
-   * Detect the role of a message element.
-   * Returns "human" or "assistant".
+   * Check if an element or its ancestors match a selector.
    */
-  function detectRole(messageEl) {
-    // Check data attributes
-    const dataRole =
-      messageEl.getAttribute("data-role") ||
-      messageEl.getAttribute("data-message-role") ||
-      messageEl.getAttribute("data-testid") ||
-      "";
-
-    if (/human|user/i.test(dataRole)) return "human";
-    if (/assistant|claude|ai|bot/i.test(dataRole)) return "assistant";
-
-    // Check class names
-    const className = messageEl.className || "";
-    if (/human|user/i.test(className)) return "human";
-    if (/assistant|claude|bot|response/i.test(className)) return "assistant";
-
-    // Check inner content for role indicators
-    const roleIndicator = messageEl.querySelector(
-      '[class*="role"], [class*="sender"], [class*="author"], [data-testid*="role"]'
-    );
-    if (roleIndicator) {
-      const text = roleIndicator.textContent.toLowerCase();
-      if (/human|user|you/i.test(text)) return "human";
-      if (/assistant|claude/i.test(text)) return "assistant";
+  function closestMatches(el, patterns) {
+    let current = el;
+    for (let i = 0; i < 15 && current; i++) {
+      const cls = current.className || "";
+      const testId = current.getAttribute && current.getAttribute("data-testid") || "";
+      const combined = cls + " " + testId;
+      for (const pattern of patterns) {
+        if (pattern instanceof RegExp) {
+          if (pattern.test(combined)) return { el: current, matched: pattern };
+        } else {
+          if (combined.includes(pattern)) return { el: current, matched: pattern };
+        }
+      }
+      current = current.parentElement;
     }
-
-    // Check for user avatar vs assistant icon
-    const avatar = messageEl.querySelector(
-      '[class*="avatar"], [class*="icon"], img[alt]'
-    );
-    if (avatar) {
-      const alt = (avatar.getAttribute("alt") || "").toLowerCase();
-      const cls = (avatar.className || "").toLowerCase();
-      if (/user|human|you/i.test(alt + cls)) return "human";
-      if (/claude|assistant|ai/i.test(alt + cls)) return "assistant";
-    }
-
-    return "unknown";
+    return null;
   }
 
   /**
-   * Main extraction: find all messages in the conversation.
+   * Get text content of an element, excluding content from nested interactive elements.
+   */
+  function getCleanTextContent(el) {
+    const clone = el.cloneNode(true);
+    // Remove buttons, toolbars, and other interactive elements
+    clone.querySelectorAll('button, [role="toolbar"], [class*="toolbar"], [class*="action"], [class*="copy"]').forEach(e => e.remove());
+    return clone.textContent.trim();
+  }
+
+  /**
+   * Main extraction: find all messages in the Claude.ai conversation.
+   * Updated to work with Claude.ai's current DOM structure.
    */
   function extractConversation() {
     const messages = [];
 
-    // Strategy 1: data-testid based selectors (common in React apps)
-    let messageEls = document.querySelectorAll(
-      '[data-testid*="message"], [data-testid*="turn"], [data-testid*="conversation"]'
-    );
+    // ======================================================================
+    // Strategy 1: Look for Claude.ai's message turn containers
+    // Claude.ai typically renders conversation as alternating turn blocks
+    // with specific data attributes or class patterns.
+    // ======================================================================
 
-    // Strategy 2: role-based attributes
-    if (messageEls.length === 0) {
-      messageEls = document.querySelectorAll(
-        '[data-role="human"], [data-role="assistant"], [data-message-role]'
-      );
-    }
+    // Claude.ai commonly uses these patterns for message containers:
+    const humanSelectors = [
+      '[data-testid*="human"]',
+      '[data-testid*="user"]',
+      '[class*="human-turn"]',
+      '[class*="user-turn"]',
+      '[class*="human-message"]',
+      '[class*="user-message"]',
+    ];
 
-    // Strategy 3: class-based selectors for Claude.ai
-    if (messageEls.length === 0) {
-      messageEls = document.querySelectorAll(
-        '[class*="message-row"], [class*="chat-message"], [class*="conversation-turn"], [class*="msg-"]'
-      );
-    }
+    const assistantSelectors = [
+      '[data-testid*="assistant"]',
+      '[data-testid*="ai-turn"]',
+      '[data-testid*="claude"]',
+      '[class*="assistant-turn"]',
+      '[class*="ai-turn"]',
+      '[class*="assistant-message"]',
+      '[class*="claude-message"]',
+      '[class*="response-"]',
+    ];
 
-    // Strategy 4: structural detection - alternating message blocks
-    if (messageEls.length === 0) {
-      // Claude.ai typically wraps messages in specific container divs
-      // Look for the main conversation container
-      const containers = document.querySelectorAll(
-        '[class*="conversation"], [class*="chat-messages"], [class*="thread"], main [class*="react-scroll"]'
-      );
+    // Try direct selectors first
+    const humanEls = document.querySelectorAll(humanSelectors.join(", "));
+    const assistantEls = document.querySelectorAll(assistantSelectors.join(", "));
 
-      for (const container of containers) {
-        const children = container.children;
-        if (children.length >= 2) {
-          messageEls = children;
-          break;
-        }
-      }
-    }
+    if (humanEls.length > 0 || assistantEls.length > 0) {
+      // Collect all message elements with their positions
+      const allMsgEls = [];
+      humanEls.forEach(el => allMsgEls.push({ el, role: "human" }));
+      assistantEls.forEach(el => allMsgEls.push({ el, role: "assistant" }));
 
-    // Strategy 5: Claude.ai specific - look for the message content areas
-    if (messageEls.length === 0) {
-      // On Claude.ai, human messages are often in elements with specific font styling
-      // and assistant messages contain rendered markdown
-      const allDivs = document.querySelectorAll(
-        'div[class*="font-"], div[class*="prose"], div[class*="markdown"]'
-      );
-      const contentAreas = Array.from(allDivs).filter((el) => {
-        const text = el.textContent.trim();
-        return text.length > 0 && text.length < 50000;
+      // Sort by DOM order
+      allMsgEls.sort((a, b) => {
+        const pos = a.el.compareDocumentPosition(b.el);
+        if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+        if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+        return 0;
       });
 
-      if (contentAreas.length >= 2) {
-        // Group by parent to find message containers
-        const parentMap = new Map();
-        contentAreas.forEach((el) => {
-          let parent = el.parentElement;
-          // Walk up a few levels to find the message container
-          for (let i = 0; i < 5 && parent; i++) {
-            if (parent.children.length <= 5) {
-              parent = parent.parentElement;
-            } else {
-              break;
-            }
+      // Remove nested duplicates (if a parent and child both matched)
+      const filtered = allMsgEls.filter((item, index) => {
+        for (let j = 0; j < allMsgEls.length; j++) {
+          if (j !== index && allMsgEls[j].el.contains(item.el) && allMsgEls[j].el !== item.el) {
+            return false; // Skip this one, it's a child of another match
           }
-          if (parent && !parentMap.has(parent)) {
-            parentMap.set(parent, []);
-          }
-          if (parent) {
-            parentMap.get(parent).push(el);
-          }
-        });
+        }
+        return true;
+      });
 
-        // Find the container with the most content areas
-        let bestParent = null;
-        let maxChildren = 0;
-        parentMap.forEach((children, parent) => {
-          if (children.length > maxChildren) {
-            maxChildren = children.length;
-            bestParent = parent;
-          }
-        });
+      for (const { el, role } of filtered) {
+        // Find the content area within the message
+        const contentArea = el.querySelector(
+          '[class*="prose"], [class*="markdown"], [class*="message-content"], [class*="msg-content"]'
+        ) || el;
+        const md = htmlToMarkdown(contentArea);
+        if (md.trim()) {
+          messages.push({ role, content: md.trim() });
+        }
+      }
 
-        if (bestParent) {
-          messageEls = bestParent.children;
+      if (messages.length > 0) {
+        return { title: getConversationTitle(), messages: dedup(messages), error: null };
+      }
+    }
+
+    // ======================================================================
+    // Strategy 2: DOM structure analysis
+    // Walk the main conversation area and identify message turns by
+    // analyzing class names, structure, and content patterns.
+    // ======================================================================
+
+    // Find the main scrollable conversation area
+    const conversationContainer = findConversationContainer();
+
+    if (conversationContainer) {
+      const turns = identifyTurns(conversationContainer);
+      if (turns.length > 0) {
+        for (const turn of turns) {
+          const md = htmlToMarkdown(turn.contentEl);
+          if (md.trim()) {
+            messages.push({ role: turn.role, content: md.trim() });
+          }
+        }
+
+        if (messages.length > 0) {
+          return { title: getConversationTitle(), messages: dedup(messages), error: null };
         }
       }
     }
 
-    if (messageEls.length === 0) {
-      return { title: getConversationTitle(), messages: [], error: "未找到对话内容。请确保当前页面是 Claude 的对话页面。" };
-    }
-
-    // Process each message element
-    let roleAlternator = "human"; // Assume first message is from human
-    Array.from(messageEls).forEach((el) => {
-      // Skip elements that are clearly not messages (toolbars, headers, etc.)
-      const text = el.textContent.trim();
-      if (!text || text.length < 1) return;
-
-      // Skip navigation, header, footer elements
-      const tag = el.tagName.toLowerCase();
-      if (["nav", "header", "footer", "aside"].includes(tag)) return;
-
-      let role = detectRole(el);
-
-      // If role detection failed, alternate between human and assistant
-      if (role === "unknown") {
-        role = roleAlternator;
-        roleAlternator = roleAlternator === "human" ? "assistant" : "human";
-      } else {
-        // Update alternator based on detected role
-        roleAlternator = role === "human" ? "assistant" : "human";
-      }
-
-      // Extract content
-      // Try to find the actual content area within the message
-      const contentArea = el.querySelector(
-        '[class*="prose"], [class*="markdown"], [class*="message-content"], [class*="msg-content"]'
-      ) || el;
-
-      const markdown = htmlToMarkdown(contentArea);
-
-      if (markdown.trim()) {
-        messages.push({
-          role: role,
-          content: markdown.trim(),
-        });
-      }
-    });
-
-    // De-duplicate: if we have consecutive same-role messages, they might be duplicates
-    const deduped = [];
-    for (let i = 0; i < messages.length; i++) {
-      if (i > 0 && messages[i].role === messages[i - 1].role && messages[i].content === messages[i - 1].content) {
-        continue; // Skip exact duplicates
-      }
-      deduped.push(messages[i]);
+    // ======================================================================
+    // Strategy 3: Generic deep scan
+    // Scan all elements for content that looks like conversation messages.
+    // ======================================================================
+    const genericMessages = genericDeepScan();
+    if (genericMessages.length > 0) {
+      return { title: getConversationTitle(), messages: dedup(genericMessages), error: null };
     }
 
     return {
       title: getConversationTitle(),
-      messages: deduped,
-      error: deduped.length === 0 ? "提取到的对话内容为空。" : null,
+      messages: [],
+      error: "未找到对话内容。请确保当前页面是 Claude 的对话页面，且对话已加载完成。",
     };
+  }
+
+  /**
+   * Find the main conversation container element.
+   */
+  function findConversationContainer() {
+    // Try specific selectors first
+    const selectors = [
+      '[class*="conversation-content"]',
+      '[class*="chat-content"]',
+      '[class*="thread-content"]',
+      'main [role="presentation"]',
+      'main [class*="react-scroll"]',
+      'main [class*="overflow"]',
+      'main',
+    ];
+
+    for (const sel of selectors) {
+      const el = document.querySelector(sel);
+      if (el && el.textContent.trim().length > 50) {
+        return el;
+      }
+    }
+
+    // Try to find the largest scrollable div with conversation content
+    const scrollables = document.querySelectorAll('div[style*="overflow"], div[class*="scroll"], div[class*="overflow"]');
+    let best = null;
+    let bestScore = 0;
+    for (const el of scrollables) {
+      const text = el.textContent.trim();
+      if (text.length > 200 && text.length > bestScore) {
+        // Check it contains multiple text blocks (likely a conversation)
+        const childDivs = el.querySelectorAll(':scope > div');
+        if (childDivs.length >= 2) {
+          bestScore = text.length;
+          best = el;
+        }
+      }
+    }
+
+    return best;
+  }
+
+  /**
+   * Identify conversation turns within a container.
+   * Returns an array of { role, contentEl } objects.
+   */
+  function identifyTurns(container) {
+    const turns = [];
+
+    // Look for top-level children that represent message turns
+    // Claude.ai usually has direct child divs for each turn
+    const topChildren = Array.from(container.querySelectorAll(':scope > div, :scope > section'));
+
+    if (topChildren.length < 2) {
+      // Try going one level deeper
+      const inner = container.querySelector(':scope > div');
+      if (inner) {
+        const innerChildren = Array.from(inner.querySelectorAll(':scope > div'));
+        if (innerChildren.length >= 2) {
+          return identifyTurnsFromElements(innerChildren);
+        }
+      }
+      return turns;
+    }
+
+    return identifyTurnsFromElements(topChildren);
+  }
+
+  /**
+   * Given a list of elements that may represent turns, identify role and content.
+   */
+  function identifyTurnsFromElements(elements) {
+    const turns = [];
+    let lastRole = null;
+
+    for (const el of elements) {
+      const text = getCleanTextContent(el);
+      if (!text || text.length < 1) continue;
+
+      // Skip elements that are clearly UI chrome (very small, nav elements, etc.)
+      const tag = el.tagName.toLowerCase();
+      if (["nav", "header", "footer", "aside"].includes(tag)) continue;
+
+      // Determine role using multiple signals
+      const role = detectRoleAdvanced(el, lastRole);
+      if (role === "skip") continue;
+
+      // Find the best content element within this turn
+      const contentEl = findContentElement(el, role);
+      if (!contentEl) continue;
+
+      const cleanText = getCleanTextContent(contentEl);
+      if (!cleanText || cleanText.length < 1) continue;
+
+      turns.push({ role, contentEl });
+      lastRole = role;
+    }
+
+    return turns;
+  }
+
+  /**
+   * Advanced role detection combining multiple signals.
+   */
+  function detectRoleAdvanced(el, lastRole) {
+    // 1. Check data-testid
+    const testId = el.getAttribute("data-testid") || "";
+    if (/human|user/i.test(testId)) return "human";
+    if (/assistant|ai|claude|response/i.test(testId)) return "assistant";
+
+    // 2. Check data-role
+    const dataRole = el.getAttribute("data-role") || "";
+    if (/human|user/i.test(dataRole)) return "human";
+    if (/assistant|ai|claude/i.test(dataRole)) return "assistant";
+
+    // 3. Check class names on the element itself
+    const className = (typeof el.className === 'string') ? el.className : '';
+    if (/human|user/i.test(className)) return "human";
+    if (/assistant|claude|response/i.test(className)) return "assistant";
+
+    // 4. Check for class patterns in child elements
+    const hasProseChild = el.querySelector('[class*="prose"], [class*="markdown"], [class*="rendered"]');
+    const hasCodeBlock = el.querySelector('pre code, [class*="code-block"], [class*="codeblock"]');
+
+    // 5. Check for user avatar or assistant icon in the element
+    const imgs = el.querySelectorAll('img[alt], [class*="avatar"], [class*="icon"]');
+    for (const img of imgs) {
+      const alt = (img.getAttribute("alt") || "").toLowerCase();
+      const cls = (typeof img.className === 'string') ? img.className.toLowerCase() : '';
+      if (/user|human|you|profile/i.test(alt + " " + cls)) return "human";
+      if (/claude|assistant|ai|bot/i.test(alt + " " + cls)) return "assistant";
+    }
+
+    // 6. Check for specific structural patterns
+    // Assistant messages typically contain rendered markdown (prose), code blocks, lists etc.
+    // Human messages are typically shorter and simpler
+    if (hasProseChild || hasCodeBlock) {
+      // This is likely an assistant message
+      return "assistant";
+    }
+
+    // 7. Check all descendants for role indicators
+    const allDescendants = el.querySelectorAll('*');
+    for (const desc of allDescendants) {
+      const descClass = (typeof desc.className === 'string') ? desc.className : '';
+      const descTestId = desc.getAttribute("data-testid") || "";
+      const combined = descClass + " " + descTestId;
+      if (/human-turn|user-turn|human-message|user-message/i.test(combined)) return "human";
+      if (/assistant-turn|ai-turn|claude-turn|assistant-message|claude-message/i.test(combined)) return "assistant";
+    }
+
+    // 8. Alternate based on last role
+    if (lastRole === "human") return "assistant";
+    if (lastRole === "assistant") return "human";
+
+    // Default: first message is usually from the human
+    return "human";
+  }
+
+  /**
+   * Find the best content element within a turn element.
+   */
+  function findContentElement(turnEl, role) {
+    // For assistant messages, look for rendered markdown containers
+    if (role === "assistant") {
+      const proseEl = turnEl.querySelector(
+        '[class*="prose"], [class*="markdown"], [class*="rendered-markdown"], [class*="message-content"]'
+      );
+      if (proseEl) return proseEl;
+    }
+
+    // For human messages, look for the text content area
+    if (role === "human") {
+      const userContent = turnEl.querySelector(
+        '[class*="user-message"], [class*="human-message"], [class*="whitespace-pre"], [class*="break-words"]'
+      );
+      if (userContent) return userContent;
+    }
+
+    // Generic: look for the largest text container within the turn
+    const candidates = turnEl.querySelectorAll('div, p, span');
+    let best = null;
+    let bestLen = 0;
+    for (const c of candidates) {
+      const text = getCleanTextContent(c);
+      // Prefer elements that are direct content holders (not deeply nested containers)
+      if (text.length > bestLen && !c.querySelector('[class*="prose"], [class*="markdown"]')) {
+        bestLen = text.length;
+        best = c;
+      }
+    }
+
+    // If best is the same as turnEl's full text, use turnEl itself
+    if (best) return best;
+    return turnEl;
+  }
+
+  /**
+   * Generic deep scan - last resort strategy.
+   * Looks for all text blocks and tries to classify them.
+   */
+  function genericDeepScan() {
+    const messages = [];
+
+    // Find all substantial text-containing elements that might be messages
+    const allElements = document.querySelectorAll(
+      '[class*="prose"], [class*="markdown"], [class*="whitespace-pre"], [class*="break-words"], [class*="font-message"], [class*="message"]'
+    );
+
+    const seen = new Set();
+    const candidates = [];
+
+    for (const el of allElements) {
+      const text = getCleanTextContent(el);
+      if (!text || text.length < 2) continue;
+      // Skip if this element is inside another candidate
+      let dominated = false;
+      for (const c of candidates) {
+        if (c.el.contains(el) && c.el !== el) {
+          dominated = true;
+          break;
+        }
+      }
+      if (dominated) continue;
+
+      // Remove any existing candidates that this element contains
+      for (let i = candidates.length - 1; i >= 0; i--) {
+        if (el.contains(candidates[i].el) && el !== candidates[i].el) {
+          candidates.splice(i, 1);
+        }
+      }
+
+      if (seen.has(text)) continue;
+      seen.add(text);
+
+      candidates.push({ el, text });
+    }
+
+    // Sort by DOM order
+    candidates.sort((a, b) => {
+      const pos = a.el.compareDocumentPosition(b.el);
+      if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+      if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+      return 0;
+    });
+
+    // Assign roles based on pattern analysis
+    let lastRole = null;
+    for (const { el } of candidates) {
+      const role = detectRoleAdvanced(el, lastRole);
+      if (role === "skip") continue;
+
+      const md = htmlToMarkdown(el);
+      if (md.trim()) {
+        messages.push({ role, content: md.trim() });
+        lastRole = role;
+      }
+    }
+
+    return messages;
+  }
+
+  /**
+   * Remove exact consecutive duplicate messages.
+   */
+  function dedup(messages) {
+    const result = [];
+    for (let i = 0; i < messages.length; i++) {
+      if (
+        i > 0 &&
+        messages[i].role === messages[i - 1].role &&
+        messages[i].content === messages[i - 1].content
+      ) {
+        continue;
+      }
+      result.push(messages[i]);
+    }
+    return result;
   }
 
   // Listen for messages from popup
@@ -429,6 +673,84 @@
         });
       }
     }
-    return true; // Keep message channel open for async response
+
+    if (request.action === "debugDOM") {
+      // Debug helper: return info about the page structure
+      try {
+        const info = debugPageStructure();
+        sendResponse(info);
+      } catch (err) {
+        sendResponse({ error: err.message });
+      }
+    }
+
+    return true;
   });
+
+  /**
+   * Debug helper: inspect the page DOM to understand message structure.
+   * Can be triggered from popup for diagnostics.
+   */
+  function debugPageStructure() {
+    const info = {
+      url: window.location.href,
+      title: document.title,
+      strategies: {},
+    };
+
+    // Check what selectors match
+    const selectorTests = {
+      'data-testid*="human"': '[data-testid*="human"]',
+      'data-testid*="user"': '[data-testid*="user"]',
+      'data-testid*="assistant"': '[data-testid*="assistant"]',
+      'data-testid*="ai"': '[data-testid*="ai"]',
+      'data-testid*="message"': '[data-testid*="message"]',
+      'data-testid*="turn"': '[data-testid*="turn"]',
+      'data-testid*="conversation"': '[data-testid*="conversation"]',
+      'class*="prose"': '[class*="prose"]',
+      'class*="markdown"': '[class*="markdown"]',
+      'class*="human"': '[class*="human"]',
+      'class*="assistant"': '[class*="assistant"]',
+      'class*="user"': '[class*="user"]',
+      'class*="message"': '[class*="message"]',
+      'class*="turn"': '[class*="turn"]',
+      'class*="chat"': '[class*="chat"]',
+      'class*="whitespace-pre"': '[class*="whitespace-pre"]',
+      'class*="break-words"': '[class*="break-words"]',
+      'class*="font"': '[class*="font"]',
+      'data-role': '[data-role]',
+      'role="presentation"': '[role="presentation"]',
+    };
+
+    for (const [name, sel] of Object.entries(selectorTests)) {
+      const els = document.querySelectorAll(sel);
+      if (els.length > 0) {
+        info.strategies[name] = {
+          count: els.length,
+          samples: Array.from(els).slice(0, 3).map(el => ({
+            tag: el.tagName,
+            className: (typeof el.className === 'string' ? el.className : '').slice(0, 200),
+            testId: el.getAttribute("data-testid") || "",
+            textPreview: el.textContent.trim().slice(0, 100),
+          })),
+        };
+      }
+    }
+
+    // Also check the main element structure
+    const main = document.querySelector('main');
+    if (main) {
+      info.mainElement = {
+        childCount: main.children.length,
+        firstChildren: Array.from(main.children).slice(0, 5).map(el => ({
+          tag: el.tagName,
+          className: (typeof el.className === 'string' ? el.className : '').slice(0, 200),
+          childCount: el.children.length,
+          textLength: el.textContent.trim().length,
+        })),
+      };
+    }
+
+    return info;
+  }
 })();
