@@ -742,6 +742,39 @@
   }
 
   /**
+   * Collapse assistant message content into a single paragraph.
+   * Removes markdown formatting and joins all text into one continuous paragraph.
+   */
+  function collapseToOneParagraph(mdContent) {
+    let text = mdContent;
+    // Remove code block markers
+    text = text.replace(/```[\s\S]*?```/g, (match) => {
+      // Extract just the code text without the ``` markers
+      return match.replace(/^```\w*\n?/, '').replace(/\n?```$/, '').trim();
+    });
+    // Remove heading markers
+    text = text.replace(/^#{1,6}\s+/gm, '');
+    // Remove bold/italic markers
+    text = text.replace(/\*{1,3}(.*?)\*{1,3}/g, '$1');
+    // Remove list markers
+    text = text.replace(/^[\s]*[-*+]\s+/gm, '');
+    text = text.replace(/^[\s]*\d+\.\s+/gm, '');
+    // Remove blockquote markers
+    text = text.replace(/^>\s?/gm, '');
+    // Remove horizontal rules
+    text = text.replace(/^---+$/gm, '');
+    // Remove inline code backticks
+    text = text.replace(/`([^`]+)`/g, '$1');
+    // Remove link markdown but keep text
+    text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+    // Remove image markdown
+    text = text.replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1');
+    // Collapse all whitespace (newlines, tabs, multiple spaces) into single spaces
+    text = text.replace(/\s+/g, ' ');
+    return text.trim();
+  }
+
+  /**
    * Remove exact consecutive duplicate messages.
    */
   function dedup(messages) {
@@ -754,7 +787,15 @@
       ) {
         continue;
       }
-      result.push(messages[i]);
+      // Collapse assistant messages into a single paragraph
+      if (messages[i].role === "assistant") {
+        result.push({
+          role: messages[i].role,
+          content: collapseToOneParagraph(messages[i].content),
+        });
+      } else {
+        result.push(messages[i]);
+      }
     }
     return result;
   }
