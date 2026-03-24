@@ -11,6 +11,74 @@
     return convertNode(element).trim();
   }
 
+  /**
+   * Try to extract LaTeX source from a KaTeX/MathJax rendered element.
+   * Returns the LaTeX string or null if not found.
+   */
+  function extractLatex(node) {
+    // Strategy 1: <annotation encoding="application/x-tex"> inside MathML
+    const annotation = node.querySelector('annotation[encoding="application/x-tex"]');
+    if (annotation) {
+      return annotation.textContent.trim();
+    }
+
+    // Strategy 2: aria-label attribute (KaTeX sets this)
+    const ariaLabel = node.getAttribute("aria-label");
+    if (ariaLabel && ariaLabel.length > 0) {
+      return ariaLabel;
+    }
+
+    // Strategy 3: Look for a <math> element's alttext
+    const mathEl = node.querySelector("math");
+    if (mathEl) {
+      const alttext = mathEl.getAttribute("alttext");
+      if (alttext) return alttext;
+    }
+
+    // Strategy 4: data-latex or data-formula attributes
+    const dataLatex = node.getAttribute("data-latex") || node.getAttribute("data-formula");
+    if (dataLatex) return dataLatex;
+
+    return null;
+  }
+
+  /**
+   * Check if an element is a KaTeX/MathJax math element.
+   * Returns { isBlock: boolean, latex: string } or null.
+   */
+  function detectMathElement(node) {
+    if (node.nodeType !== Node.ELEMENT_NODE) return null;
+
+    const className = (typeof node.className === 'string') ? node.className : '';
+
+    // KaTeX display math: <span class="katex-display"> or <div class="katex-display">
+    if (className.includes("katex-display")) {
+      const latex = extractLatex(node);
+      if (latex) return { isBlock: true, latex };
+    }
+
+    // KaTeX inline math: <span class="katex">
+    if (className.includes("katex") && !className.includes("katex-display")) {
+      const latex = extractLatex(node);
+      if (latex) return { isBlock: false, latex };
+    }
+
+    // MathJax display: <div class="MathJax_Display"> or <mjx-container display="true">
+    if (className.includes("MathJax_Display") || className.includes("MathJax")) {
+      const latex = extractLatex(node);
+      if (latex) return { isBlock: className.includes("Display"), latex };
+    }
+
+    // MathJax v3: <mjx-container>
+    if (node.tagName && node.tagName.toLowerCase() === "mjx-container") {
+      const latex = extractLatex(node);
+      const isBlock = node.getAttribute("display") === "true" || node.hasAttribute("display");
+      if (latex) return { isBlock, latex };
+    }
+
+    return null;
+  }
+
   function convertNode(node) {
     if (node.nodeType === Node.TEXT_NODE) {
       return node.textContent;
@@ -18,6 +86,16 @@
 
     if (node.nodeType !== Node.ELEMENT_NODE) {
       return "";
+    }
+
+    // ---- Math/formula detection (must come before tag-based dispatch) ----
+    const mathInfo = detectMathElement(node);
+    if (mathInfo) {
+      if (mathInfo.isBlock) {
+        return `\n\n$$${mathInfo.latex}$$\n\n`;
+      } else {
+        return `$${mathInfo.latex}$`;
+      }
     }
 
     const tag = node.tagName.toLowerCase();
@@ -145,6 +223,28 @@
 
       case "hr":
         return "\n---\n\n";
+
+      // Skip MathML elements (already handled by extractLatex)
+      case "math":
+      case "semantics":
+      case "mrow":
+      case "mi":
+      case "mo":
+      case "mn":
+      case "msup":
+      case "msub":
+      case "mfrac":
+      case "msqrt":
+      case "mover":
+      case "munder":
+      case "mtable":
+      case "mtr":
+      case "mtd":
+      case "mtext":
+      case "mspace":
+      case "annotation":
+      case "annotation-xml":
+        return "";
 
       case "div":
       case "span":
@@ -720,6 +820,15 @@
       'class*="font"': '[class*="font"]',
       'data-role': '[data-role]',
       'role="presentation"': '[role="presentation"]',
+      // Math/formula selectors
+      'class*="katex"': '[class*="katex"]',
+      'class*="MathJax"': '[class*="MathJax"]',
+      'mjx-container': 'mjx-container',
+      'annotation[encoding]': 'annotation[encoding="application/x-tex"]',
+      'math': 'math',
+      // Mermaid/diagram selectors
+      'class*="mermaid"': '[class*="mermaid"]',
+      'class*="diagram"': '[class*="diagram"]',
     };
 
     for (const [name, sel] of Object.entries(selectorTests)) {

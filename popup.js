@@ -124,15 +124,38 @@
   function formatAsWordHTML(data, options) {
     const title = titleInput.value || data.title || "Claude 对话";
 
-    // Simple Markdown to HTML conversion for Word
+    // Markdown to HTML conversion for Word (with LaTeX formula support)
     function mdToHtml(md) {
       let html = md;
+
+      // Protect LaTeX formulas from being processed by other rules
+      const formulaStore = [];
+      // Block formulas: $$...$$
+      html = html.replace(/\$\$([\s\S]*?)\$\$/g, (_, latex) => {
+        const idx = formulaStore.length;
+        formulaStore.push({
+          isBlock: true,
+          latex: latex.trim(),
+        });
+        return `%%FORMULA_${idx}%%`;
+      });
+      // Inline formulas: $...$
+      html = html.replace(/\$([^\$\n]+?)\$/g, (_, latex) => {
+        const idx = formulaStore.length;
+        formulaStore.push({
+          isBlock: false,
+          latex: latex.trim(),
+        });
+        return `%%FORMULA_${idx}%%`;
+      });
 
       // Code blocks
       html = html.replace(
         /```(\w*)\n([\s\S]*?)```/g,
-        (_, lang, code) =>
-          `<pre style="background:#f5f5f5;padding:12px;border-radius:4px;border:1px solid #ddd;font-family:Consolas,monospace;font-size:13px;overflow-x:auto;"><code>${escapeHtml(code.trim())}</code></pre>`
+        (_, lang, code) => {
+          const langLabel = lang ? `<div style="background:#e8e8e8;padding:4px 12px;border-radius:4px 4px 0 0;font-size:12px;color:#666;font-family:Consolas,monospace;">${escapeHtml(lang)}</div>` : '';
+          return `${langLabel}<pre style="background:#f5f5f5;padding:12px;border-radius:${lang ? '0 0 4px 4px' : '4px'};border:1px solid #ddd;font-family:Consolas,monospace;font-size:13px;overflow-x:auto;margin-top:0;"><code>${escapeHtml(code.trim())}</code></pre>`;
+        }
       );
 
       // Inline code
@@ -167,6 +190,28 @@
         '<blockquote style="border-left:4px solid #c9a0ff;padding-left:12px;color:#666;margin:8px 0;">$1</blockquote>'
       );
 
+      // Markdown tables → HTML tables
+      html = html.replace(
+        /(?:^|\n)(\|.+\|)\n(\|[\s:|-]+\|)\n((?:\|.+\|\n?)+)/g,
+        (_, headerRow, separatorRow, bodyRows) => {
+          const headers = headerRow.split("|").filter(c => c.trim()).map(c => c.trim());
+          const rows = bodyRows.trim().split("\n").map(row =>
+            row.split("|").filter(c => c.trim()).map(c => c.trim())
+          );
+          let table = '<table style="border-collapse:collapse;margin:12px 0;width:100%;">';
+          table += '<tr>' + headers.map(h =>
+            `<th style="border:1px solid #ccc;padding:8px 12px;background:#f0f0f0;font-weight:bold;text-align:left;">${h}</th>`
+          ).join('') + '</tr>';
+          rows.forEach(row => {
+            table += '<tr>' + row.map(c =>
+              `<td style="border:1px solid #ccc;padding:8px 12px;">${c}</td>`
+            ).join('') + '</tr>';
+          });
+          table += '</table>';
+          return table;
+        }
+      );
+
       // Unordered lists
       html = html.replace(/^- (.+)$/gm, "<li>$1</li>");
       html = html.replace(
@@ -188,6 +233,17 @@
         /^(?!<[a-z/])((?!<).+)$/gm,
         '<p style="margin:6px 0;line-height:1.7;">$1</p>'
       );
+
+      // Restore formulas - render as styled text in Word
+      html = html.replace(/%%FORMULA_(\d+)%%/g, (_, idx) => {
+        const f = formulaStore[parseInt(idx)];
+        if (!f) return '';
+        if (f.isBlock) {
+          return `<div style="text-align:center;margin:16px 0;padding:12px;background:#f9f9ff;border:1px solid #e0e0f0;border-radius:4px;font-family:'Cambria Math','Times New Roman',serif;font-size:14px;font-style:italic;">${escapeHtml(f.latex)}</div>`;
+        } else {
+          return `<span style="font-family:'Cambria Math','Times New Roman',serif;font-style:italic;color:#333;">${escapeHtml(f.latex)}</span>`;
+        }
+      });
 
       return html;
     }
